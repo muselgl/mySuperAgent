@@ -3,6 +3,7 @@ from __future__ import annotations
 import argparse
 import json
 from pathlib import Path
+import signal
 import sys
 
 from .chat import ChatController
@@ -14,6 +15,7 @@ from .model_planner import ModelPlanner
 from .planner import LocalPlanner
 from .store import TaskStore
 from .tools import default_registry, model_registry
+from .runtime import RouterService, WorkerService, SupervisorService, WatchdogService
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -42,6 +44,14 @@ def build_parser() -> argparse.ArgumentParser:
     chat.add_argument("--db", default=".superagent/state.db", help="SQLite state path")
     chat.add_argument("--env-file", default=".env", help="model configuration file")
 
+    for name in ("router", "worker", "supervisor", "watchdog"):
+        service = subparsers.add_parser(name, help=f"run {name} service")
+        service.add_argument("action", choices=["serve"])
+        service.add_argument("--db", default=".superagent/state.db")
+        service.add_argument("--worker-id", default=None)
+        service.add_argument("--once", action="store_true")
+        service.add_argument("--duration", type=float, default=None)
+
     return parser
 
 
@@ -65,6 +75,8 @@ def main(argv: list[str] | None = None) -> int:
             return run_task(args.task_id, args.db, args.planner, args.watch, args.env_file)
         if args.command == "chat":
             return handle_chat(args)
+        if args.command in {"router", "worker", "supervisor", "watchdog"}:
+            return serve_service(args)
         return handle_task(args)
     except (ConfigurationError, ModelAPIError, ValueError, OSError) as error:
         print(f"Superagent failed: {error}", file=sys.stderr)
@@ -90,12 +102,17 @@ def check_model(env_file: str) -> int:
 def handle_task(args: argparse.Namespace) -> int:
     store = TaskStore(args.db)
     value = args.value
+    if value == "create":
+        if not args.extra:
+            print("task create requires an instruction", file=sys.stderr)
+            return 2
+        value = " ".join(args.extra)
     if value == "list":
         for task in store.list_tasks():
             print(f"{task.id}\t{task.status.value}\t{task.instruction}")
         return 0
 
-    if value in {"show", "run", "cancel"}:
+    if value in {"show", "run", "cancel", "approve", "resume", "events"}:
         if not args.extra:
             print(f"task {value} requires a task id", file=sys.stderr)
             return 2
@@ -104,6 +121,27 @@ def handle_task(args: argparse.Namespace) -> int:
             return show_task(store, task_id)
         if value == "run":
             return run_task(task_id, args.db, args.planner, args.watch, args.env_file)
+        if value == "events":
+            print(json.dumps(store.events(task_id), ensure_ascii=False, indent=2))
+            return 0
+        if value in {"approve", "resume"}:
+            task = store.get_task(task_id)
+            if task is None:
+                print(f"Unknown task: {task_id}", file=sys.stderr)
+                return 1
+            if value == "resume":
+                task.status = TaskStatus.QUEUED
+                store.save_task(task)
+                store.append_event(task.id, "task_resumed", {"reason": "resumed by user"})
+            else:
+                approval_id = args.extra[1] if len(args.extra) > 1 else None
+                if approval_id:
+                    store.decide_approval(approval_id, "approved")
+                task.status = TaskStatus.QUEUED
+                store.save_task(task)
+                store.append_event(task.id, "approval_approved", {"approval_id": approval_id})
+            print(f"{value}d {task.id}")
+            return 0
         task = store.get_task(task_id)
         if task is None:
             print(f"Unknown task: {task_id}", file=sys.stderr)
@@ -134,6 +172,23 @@ def handle_task(args: argparse.Namespace) -> int:
     if args.watch:
         return run_task(task.id, args.db, watch=True, env_file=args.env_file)
     return 0
+
+
+def serve_service(args: argparse.Namespace) -> int:
+    store = TaskStore(args.db)
+    if args.command == "router":
+        service = RouterService(store)
+    elif args.command == "worker":
+        service = WorkerService(store, args.worker_id or new_id("worker"), LoopController(store, default_registry(), LocalPlanner()))
+    elif args.command == "watchdog":
+        service = WatchdogService("watchdog", store)
+    else:
+        service = SupervisorService("supervisor", store)
+    signal.signal(signal.SIGINT, service.stop)
+    if hasattr(signal, "SIGTERM"):
+        signal.signal(signal.SIGTERM, service.stop)
+    print(f"{args.command} serving", flush=True)
+    return service.serve(once=args.once, duration=args.duration)
 
 
 def show_task(store: TaskStore, task_id: str) -> int:

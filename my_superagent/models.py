@@ -161,6 +161,64 @@ class Task:
     updated_at: str = field(default_factory=now_iso)
     planner: str = "local"
     final_summary: str = ""
+    environment_id: str | None = None
+    active_run_id: str | None = None
+    lease_owner: str | None = None
+    lease_expires_at: str | None = None
+    fencing_token: int = 0
+    retry_count: int = 0
+    recovery_count: int = 0
+
+
+@dataclass
+class EventEnvelope:
+    event_type: str
+    source: str
+    payload: dict[str, Any] = field(default_factory=dict)
+    event_id: str = field(default_factory=lambda: new_id("evt"))
+    schema_version: int = 1
+    thread_id: str | None = None
+    task_id: str | None = None
+    run_id: str | None = None
+    causation_id: str | None = None
+    idempotency_key: str | None = None
+    sequence: int = 0
+    created_at: str = field(default_factory=now_iso)
+    fencing_token: int = 0
+
+    def to_dict(self) -> dict[str, Any]:
+        return asdict(self)
+
+    @classmethod
+    def from_dict(cls, value: dict[str, Any]) -> "EventEnvelope":
+        required = {"event_type", "source", "payload"}
+        missing = required - set(value)
+        if missing:
+            raise ValueError(f"Event missing fields: {', '.join(sorted(missing))}")
+        return cls(**{key: value[key] for key in cls.__dataclass_fields__ if key in value})
+
+
+@dataclass
+class Lease:
+    task_id: str
+    run_id: str
+    owner: str
+    fencing_token: int
+    expires_at: str
+
+
+@dataclass
+class OutboxMessage:
+    message_id: str
+    event_id: str
+    target: str
+    payload: dict[str, Any]
+    status: str = "pending"
+    delivery_attempts: int = 0
+    last_error: str | None = None
+    next_attempt_at: str | None = None
+    acknowledged_at: str | None = None
+    created_at: str = field(default_factory=now_iso)
 
 
 @dataclass
@@ -200,6 +258,8 @@ class WorkerReport:
     blocking_reason: str | None = None
     next_action: str | None = None
     created_at: str = field(default_factory=now_iso)
+    run_id: str | None = None
+    fencing_token: int = 0
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)

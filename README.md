@@ -9,6 +9,12 @@ python -m my_superagent.cli task "检查这个仓库并运行测试" --repo .
 python -m my_superagent.cli task list
 python -m my_superagent.cli task run <task-id>
 python -m my_superagent.cli task show <task-id>
+
+# Router/Worker service entry points
+python -m my_superagent.cli router serve
+python -m my_superagent.cli worker serve --worker-id worker-1
+python -m my_superagent.cli supervisor serve
+python -m my_superagent.cli watchdog serve
 ```
 
 第一阶段使用标准库实现 Router/Worker 的任务状态、计划、工具执行和 WorkerReport。支持确定性 `LocalPlanner` 和模型驱动的 `ModelPlanner`。
@@ -121,3 +127,18 @@ python -m pytest -q
 自动测试使用模拟模型回复验证任务与连续对话的 CLI 执行链路、工具反馈、会话恢复、异常重试、上下文裁剪、预算控制和数据库迁移。真实服务可使用 `chat --repo .` 连续追问，或使用上面的 `--planner model --watch` 命令执行任务。
 
 架构说明见 [docs/architecture.md](docs/architecture.md)。
+
+## Router/Worker 基础能力
+
+打开 SQLite 时会自动启用 WAL、外键检查和幂等迁移。状态库现在包含 Thread、Trigger、Run、Lease、Outbox、Artifact、Approval、订阅、依赖、检查点、Environment 和 Lock 表；旧数据库会保留原任务与聊天数据。
+
+事件通过版本化 `EventEnvelope` 保存，`TaskStore.append_envelope()` 同时写入任务事件与 Outbox。`claim_task()` 使用事务和 fencing token 领取任务，`heartbeat()` 只续租，旧 token 的写入会被拒绝。Broker 通道有固定容量，满载时消息落入 Outbox。
+
+常用控制命令：
+
+```powershell
+python -m my_superagent.cli task create "检查仓库" --repo .
+python -m my_superagent.cli task events <task-id>
+python -m my_superagent.cli task approve <task-id> <approval-id>
+python -m my_superagent.cli task resume <task-id>
+```
